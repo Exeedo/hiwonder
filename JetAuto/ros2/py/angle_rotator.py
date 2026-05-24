@@ -4,13 +4,13 @@ from rclpy.node import Node
 from rclpy import Future
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from math import pi, fabs
 
+import signal
 from time import time
 import argparse
-import math
+from math import pi, degrees, atan2, radians
 
-class Rotator(Node):
+class AngleRotator(Node):
     def __init__(
         self,
         angle=90,  # in degrees
@@ -19,8 +19,8 @@ class Rotator(Node):
         reverse=False,
         **kwargs
     ):
-        super().__init__('rotator')
-        angle_rad = angle * pi / 180.0
+        super().__init__('angle_rotator')
+        angle_rad = radians(angle)
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.get_logger().info("Starting ...")
@@ -29,36 +29,54 @@ class Rotator(Node):
         self.current_x = float(0.0)
         self.current_y = float(0.0)
         self.current_theta = float(0.0)
+        self.current_theta_deg = float(0.0)
         self.angle = float(angle_rad)
         self.ang_speed = float(ang_speed)
         self.timer = self.create_timer(0.1, self.rotate_cw if reverse else self.rotate_ccw)
         self.time = time()
         self.minimum_duration = minimum_duration
-        self.running = True
         self.twist = None
         self.future = Future()
+        signal.signal(signal.SIGINT, self.shutdown)
 
     def get_theta(self, msg):
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
         siny_cosp = 2 * (qz * qw)
-        return math.atan2(siny_cosp, 1 - 2 * qz**2)  # Yaw from quaternion
+        return atan2(siny_cosp, 1 - 2 * qz**2)  # Yaw from quaternion
 
+    def force_stop(self):
+        self.get_logger().info(f'Forcefully stopping the robot')
+        self.pub.publish(Twist())
+        self.future.set_result(True)
+        self.timer.cancel()
+
+    def shutdown(self, signum, frame):
+        self.force_stop()
+        self.get_logger().info('\033[1;32m%s\033[0m' % 'shutdown')
+        rclpy.shutdown()
 
     def odom_callback(self, msg):
         self.current_x = msg.pose.pose.position.x
         self.current_y = msg.pose.pose.position.y
         self.current_theta = self.get_theta(msg)
+        self.current_theta_deg = degrees(self.current_theta)
         if not self.initialized:
-            self.initial_distance = (self.current_x, self.current_y, self.current_theta)
+            self.initial_distance = (self.current_x, self.current_y, self.current_theta, self.current_theta_deg)
             self.initialized = True
-            self.get_logger().info(f"Initialized to {self.initial_distance}")
+            self.get_logger().info(f"Initialized to {self.get_position_string()}")
 
         # Limit to a single log every minimum_duration seconds
         if time() - self.time < self.minimum_duration:
             return
         self.time = time()
-        self.get_logger().info(f"Position: x={self.current_x:.3f}, y={self.current_y:.3f}, theta={self.current_theta:.3f}")
+        self.show_current_position()
+
+    def show_current_position(self):
+        self.get_logger().info(self.get_position_string())
+
+    def get_position_string(self):
+        return f"Position: x={self.current_x:.3f}, y={self.current_y:.3f}, theta={self.current_theta_deg:.3f}"
 
     @staticmethod
     def normalize_angle(angle):
@@ -81,7 +99,8 @@ class Rotator(Node):
                 self.twist = twist
         else:
             twist.angular.z = 0.0
-            self.get_logger().info(f'Angle of {self.angle * 180.0 / pi} completed!')
+            self.show_current_position()
+            self.get_logger().info(f'Angle of {degrees(self.angle)} completed!')
             # Exit gracefully
             self.future.set_result(True)
             self.timer.cancel()
@@ -98,7 +117,8 @@ class Rotator(Node):
                 self.twist = twist
         else:
             twist.angular.z = 0.0
-            self.get_logger().info(f'Angle of {self.angle * 180.0 / pi} completed!')
+            self.show_current_position()
+            self.get_logger().info(f'Angle of {degrees(self.angle)} completed!')
             # Exit gracefully
             self.future.set_result(True)
             self.timer.cancel()
@@ -108,14 +128,15 @@ class Rotator(Node):
 
 def main(args=None):
     rclpy.init()
-    node = Rotator(**args.__dict__)
+    node = AngleRotator(**args.__dict__)
     try:
         rclpy.spin_until_future_complete(node, node.future)  # Blocks until future done
     except KeyboardInterrupt:
         print("Keyboard Interrupt")
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Rotate robot in-place")
